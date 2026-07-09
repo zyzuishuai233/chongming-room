@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>崇明机房 - MEP 3D 查看器</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#1a1a2e; overflow:hidden; font-family:system-ui,sans-serif; }
+
+#status {
+  position:fixed; top:0; left:0; right:0; z-index:100;
+  background:rgba(0,0,0,0.85); color:#ccc; padding:6px 12px;
+  font-size:13px; display:flex; align-items:center; gap:10px;
+}
+#bar-wrap { flex:1; height:6px; background:#333; border-radius:3px; overflow:hidden; }
+#bar { height:100%; width:0; background:#4fc3f7; transition:width .3s; }
+#msg { white-space:nowrap; }
+
+#panel {
+  position:fixed; top:40px; left:8px; z-index:99;
+  background:rgba(0,0,0,0.8); color:#ddd; border-radius:8px;
+  padding:10px 14px; font-size:12px; min-width:130px;
+}
+#storey-info {
+  font-size:11px; color:#aaa; margin-bottom:6px; padding-bottom:6px;
+  border-bottom:1px solid #333; display:flex; align-items:center; gap:6px;
+}
+#storey-info .tag {
+  display:inline-block; background:#4fc3f7; color:#000; padding:1px 6px;
+  border-radius:3px; font-size:10px; font-weight:600;
+}
+#panel h3 { font-size:13px; margin:0 0 6px; color:#fff; border-bottom:1px solid #444; padding-bottom:4px; }
+#legend-list { list-style:none; }
+#legend-list li { padding:3px 0; cursor:pointer; display:flex; align-items:center; gap:6px; opacity:1; transition:opacity .2s; user-select:none; }
+#legend-list li.off { opacity:0.3; text-decoration:line-through; }
+#legend-list .dot { width:10px; height:10px; border-radius:50%; display:inline-block; flex-shrink:0; }
+#legend-list .count { color:#888; font-size:10px; margin-left:auto; }
+
+#tools {
+  position:fixed; bottom:12px; left:50%; transform:translateX(-50%); z-index:99;
+  display:flex; gap:6px; flex-wrap:wrap; justify-content:center;
+}
+.tool-btn {
+  background:rgba(0,0,0,0.75); color:#ddd; border:1px solid #555;
+  padding:6px 12px; border-radius:5px; font-size:12px; cursor:pointer;
+  white-space:nowrap; transition:all .15s;
+}
+.tool-btn:active { background:#4fc3f7; color:#000; border-color:#4fc3f7; }
+.tool-btn.active { background:#4fc3f7; color:#000; border-color:#4fc3f7; }
+.tool-btn.highlight { background:#e6261a; color:#fff; border-color:#e6261a; font-weight:bold; }
+
+@media (hover:hover) {
+  .tool-btn:hover { background:#555; }
+  .tool-btn.highlight:hover { background:#ff3b2f; }
+}
+</style>
+</head>
+<body>
+
+<div id="status">
+  <span id="msg">加载中…</span>
+  <div id="bar-wrap"><div id="bar"></div></div>
+</div>
+
+<div id="panel">
+  <div id="storey-info"><span class="tag">标高</span><span id="storey-name">1F(3900)</span></div>
+  <h3>构件图例</h3>
+  <ul id="legend-list"></ul>
+</div>
+
+<div id="tools">
+  <button class="tool-btn" id="btn-fit">适配</button>
+  <button class="tool-btn" id="btn-wire">线框</button>
+  <button class="tool-btn" id="btn-top">俯视</button>
+  <button class="tool-btn" id="btn-front">正视</button>
+  <button class="tool-btn" id="btn-auto">旋转</button>
+  <button class="tool-btn" id="btn-full">全屏</button>
+  <button class="tool-btn" id="btn-reset">重置</button>
+  <button class="tool-btn highlight" id="btn-dl">下载离线包</button>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "./three.module.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from './OrbitControls.js';
+import { GLTFLoader } from './GLTFLoader.js';
+import { MeshoptDecoder } from './meshopt_decoder.module.js';
+
+const statusEl = document.getElementById('status');
+const barEl = document.getElementById('bar');
+const msgEl = document.getElementById('msg');
+const legendList = document.getElementById('legend-list');
+const storeyName = document.getElementById('storey-name');
+
+function log(msg) {
+  msgEl.textContent = msg;
+  console.log('[Viewer]', msg);
+}
+
+log('初始化…');
+
+// Scene
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a2e);
+const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.1, 500);
+camera.position.set(30, 20, 30);
+
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
+document.body.appendChild(renderer.domElement);
+
+// Lights
+scene.add(new THREE.AmbientLight(0x8899bb, 2));
+const sun = new THREE.DirectionalLight(0xffffff, 4);
+sun.position.set(40, 50, 30);
+scene.add(sun);
+const back = new THREE.DirectionalLight(0x8899cc, 1.5);
+back.position.set(-20, 10, -20);
+scene.add(back);
+
+// Controls
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.target.set(0, 2, 0);
+controls.update();
+
+// Grid
+const grid = new THREE.GridHelper(60, 30, 0x334455, 0x1a1a2e);
+grid.position.y = -0.01;
+scene.add(grid);
+
+const categoryGroups = {};
+const allMeshes = [];
+
+// Color scheme for 崇明机房
+const catColors = {
+  '墙体': '#bfbfc7',
+  '风管': '#3388d9',
+  '管件': '#4dbf60',
+  '设备': '#e6331a',
+  '其他': '#8c8c8c'
+};
+const renderOrder = ['设备', '管件', '风管', '墙体', '其他'];
+
+function buildLegend(gltf) {
+  const catCount = {};
+  gltf.scene.traverse(node => {
+    if (node.isMesh && node.userData && node.userData.category) {
+      const cat = node.userData.category;
+      catCount[cat] = (catCount[cat] || 0) + 1;
+    }
+  });
+
+  legendList.innerHTML = '';
+  renderOrder.forEach(cat => {
+    if (!catCount[cat]) return;
+    const li = document.createElement('li');
+    li.innerHTML = '<span class="dot" style="background:' + (catColors[cat]||'#888') + '"></span>' + cat + '<span class="count">' + catCount[cat] + '</span>';
+    li.dataset.cat = cat;
+    li.onclick = () => {
+      const off = li.classList.toggle('off');
+      Object.keys(categoryGroups).forEach(c => {
+        if (c !== cat) return;
+        categoryGroups[c].forEach(m => { m.visible = !off; });
+      });
+    };
+    legendList.appendChild(li);
+  });
+}
+
+// Load model
+log('加载模型…');
+const loader = new GLTFLoader();
+loader.setMeshoptDecoder(MeshoptDecoder);
+loader.load(
+  'model.glb',
+  gltf => {
+    barEl.style.width = '100%';
+    log('渲染中…');
+
+    // Show storey info from GLB extras
+    if (gltf.parser && gltf.parser.json && gltf.parser.json.extras && gltf.parser.json.extras.storeys) {
+      const storeys = gltf.parser.json.extras.storeys;
+      storeyName.textContent = storeys.map(s => s.name + ' ±' + s.elevation.toFixed(3) + 'm').join(' | ');
+    }
+
+    // Process meshes — use mesh name from GLTF
+    gltf.scene.traverse(node => {
+      if (node.isMesh) {
+        allMeshes.push(node);
+        let cat = '其他';
+        // Detect from mesh name (set during conversion)
+        if (node.name) {
+          const n = node.name;
+          if (n.includes('设备') || n.includes('新风机')) cat = '设备';
+          else if (n.includes('管件')) cat = '管件';
+          else if (n.includes('风管') || n.includes('风管')) cat = '风管';
+          else if (n.includes('墙体') || n.includes('墙')) cat = '墙体';
+        }
+        // Also check parent node name (gltfpack might restructure)
+        if (cat === '其他' && node.parent && node.parent.name) {
+          const pn = node.parent.name;
+          if (pn.includes('设备')) cat = '设备';
+          else if (pn.includes('管件')) cat = '管件';
+          else if (pn.includes('风管')) cat = '风管';
+          else if (pn.includes('墙体')) cat = '墙体';
+        }
+
+        node.userData = node.userData || {};
+        node.userData.category = cat;
+        if (!categoryGroups[cat]) categoryGroups[cat] = [];
+        categoryGroups[cat].push(node);
+
+        // Apply per-category material color
+        const colorHex = catColors[cat] || catColors['其他'];
+        if (node.material) {
+          if (Array.isArray(node.material)) {
+            node.material.forEach(m => { m.color.set(colorHex); m.roughness = 0.5; m.metalness = 0.1; });
+          } else {
+            node.material.color.set(colorHex);
+            node.material.roughness = 0.5;
+            node.material.metalness = 0.1;
+          }
+        }
+      }
+    });
+
+    scene.add(gltf.scene);
+    buildLegend(gltf);
+
+    // Highlight 设备 (新风机) with stronger material
+    if (categoryGroups['设备']) {
+      categoryGroups['设备'].forEach(m => {
+        m.material = new THREE.MeshStandardMaterial({
+          color: 0xe6331a,
+          roughness: 0.35,
+          metalness: 0.2
+        });
+        m.renderOrder = 1;
+      });
+    }
+
+    log('就绪 - ' + allMeshes.length + ' 构件');
+    statusEl.style.display = 'none';
+
+    // Auto-fit camera
+    const box = new THREE.Box3().setFromObject(gltf.scene);
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const dist = maxDim * 1.5;
+    controls.target.copy(center);
+    camera.position.set(center.x + dist * 0.7, center.y + dist * 0.5, center.z + dist * 0.7);
+    camera.near = maxDim * 0.01;
+    camera.far = maxDim * 10;
+    camera.updateProjectionMatrix();
+    controls.update();
+  },
+  xhr => {
+    if (xhr.total) {
+      const pct = Math.round(xhr.loaded / xhr.total * 100);
+      barEl.style.width = pct + '%';
+      log('加载中 ' + pct + '%…');
+    }
+  },
+  err => {
+    log('加载失败: ' + (err.message || '未知错误'));
+    barEl.style.background = '#ef5350';
+    console.error('[Viewer]', err);
+  }
+);
+
+// Buttons
+document.getElementById('btn-fit').onclick = () => {
+  const box = new THREE.Box3().setFromObject(scene);
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const dist = Math.max(size.x, size.y, size.z) * 1.5;
+  controls.target.copy(center);
+  camera.position.set(center.x + dist*0.6, center.y + dist*0.5, center.z + dist*0.6);
+  controls.update();
+};
+
+let wireframeOn = false;
+document.getElementById('btn-wire').onclick = function() {
+  wireframeOn = !wireframeOn;
+  this.classList.toggle('active', wireframeOn);
+  allMeshes.forEach(m => {
+    if (m.material) {
+      if (Array.isArray(m.material)) {
+        m.material.forEach(mat => { mat.wireframe = wireframeOn; });
+      } else {
+        m.material.wireframe = wireframeOn;
+      }
+    }
+  });
+};
+
+document.getElementById('btn-top').onclick = () => {
+  const box = new THREE.Box3().setFromObject(scene);
+  const center = box.getCenter(new THREE.Vector3());
+  controls.target.copy(center);
+  camera.position.set(center.x, center.y + 30, center.z);
+  controls.update();
+};
+
+document.getElementById('btn-front').onclick = () => {
+  const box = new THREE.Box3().setFromObject(scene);
+  const center = box.getCenter(new THREE.Vector3());
+  controls.target.copy(center);
+  camera.position.set(center.x, center.y, center.z + 30);
+  controls.update();
+};
+
+let autoRotate = false;
+document.getElementById('btn-auto').onclick = function() {
+  autoRotate = !autoRotate;
+  this.classList.toggle('active', autoRotate);
+  controls.autoRotate = autoRotate;
+  controls.autoRotateSpeed = 1.5;
+};
+
+document.getElementById('btn-full').onclick = () => {
+  if (document.fullscreenElement) {
+    document.exitFullscreen();
+  } else {
+    document.body.requestFullscreen();
+  }
+};
+
+document.getElementById('btn-reset').onclick = () => {
+  wireframeOn = false;
+  document.getElementById('btn-wire').classList.remove('active');
+  allMeshes.forEach(m => {
+    if (m.material) {
+      if (Array.isArray(m.material)) {
+        m.material.forEach(mat => { mat.wireframe = false; });
+      } else {
+        m.material.wireframe = false;
+      }
+    }
+  });
+  controls.target.set(0, 2, 0);
+  camera.position.set(30, 20, 30);
+  controls.update();
+  legendList.querySelectorAll('li').forEach(li => li.classList.remove('off'));
+  allMeshes.forEach(m => { m.visible = true; });
+};
+
+const dlBtn = document.getElementById('btn-dl');
+if (location.protocol === 'file:') {
+  dlBtn.style.display = 'none';
+}
+dlBtn.onclick = () => {
+  window.open('崇明机房-离线版.zip', '_blank');
+};
+
+// Resize
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Render loop
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+log('就绪');
+</script>
+</body>
+</html>
